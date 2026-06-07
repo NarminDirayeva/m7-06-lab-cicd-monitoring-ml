@@ -1,0 +1,173 @@
+groups:
+  - name: vision-moderation.slo
+    interval: 30s
+    rules:
+
+      # ──────────────────────────────────────────────────────────────────
+      # 1. Availability Burn — Fast (multi-window)
+      #    Trigger: 2% of monthly error budget consumed in 1 hour
+      #    Routing: PagerDuty page
+      #
+      #    Monthly error budget for 99.5% SLO:
+      #      budget = 1 - 0.995 = 0.005
+      #    Fast burn multiplier for 2% budget in 1h:
+      #      burn_rate = (0.02 * 30*24) / 1 = 14.4
+      # ──────────────────────────────────────────────────────────────────
+      - alert: AvailabilityBurnFast
+        expr: |
+          (
+            (
+              sum(rate(http_requests_total{job="vision-moderation",code=~"5.."}[1h]))
+              /
+              sum(rate(http_requests_total{job="vision-moderation"}[1h]))
+            ) > (14.4 * (1 - 0.995))
+          )
+          and
+          (
+            (
+              sum(rate(http_requests_total{job="vision-moderation",code=~"5.."}[5m]))
+              /
+              sum(rate(http_requests_total{job="vision-moderation"}[5m]))
+            ) > (14.4 * (1 - 0.995))
+          )
+        for: 5m
+        labels:
+          severity: page
+          team: ml-platform
+          service: vision-moderation
+        annotations:
+          summary: "Availability fast burn — error budget depleting rapidly"
+          description: >
+            Error rate is {{ $value | humanizePercentage }} over the last 1h,
+            which is a 14.4× burn rate against the 99.5% SLO.
+            At this pace, 2% of the monthly error budget will be gone in 1 hour.
+          runbook: "https://runbooks.example.com/vision-moderation/availability-burn-fast"
+          dashboard: "https://grafana.example.com/d/vision-mod-slo"
+
+      # ──────────────────────────────────────────────────────────────────
+      # 2. Availability Burn — Slow (multi-window)
+      #    Trigger: 10% of monthly error budget consumed in 24 hours
+      #    Routing: Linear ticket
+      #
+      #    Slow burn multiplier for 10% budget in 24h:
+      #      burn_rate = (0.10 * 30*24) / 24 = 3.0
+      # ──────────────────────────────────────────────────────────────────
+      - alert: AvailabilityBurnSlow
+        expr: |
+          (
+            (
+              sum(rate(http_requests_total{job="vision-moderation",code=~"5.."}[6h]))
+              /
+              sum(rate(http_requests_total{job="vision-moderation"}[6h]))
+            ) > (3.0 * (1 - 0.995))
+          )
+          and
+          (
+            (
+              sum(rate(http_requests_total{job="vision-moderation",code=~"5.."}[30m]))
+              /
+              sum(rate(http_requests_total{job="vision-moderation"}[30m]))
+            ) > (3.0 * (1 - 0.995))
+          )
+        for: 15m
+        labels:
+          severity: ticket
+          team: ml-platform
+          service: vision-moderation
+        annotations:
+          summary: "Availability slow burn — error budget silently eroding"
+          description: >
+            Error rate is {{ $value | humanizePercentage }} over a 6h window,
+            representing a 3.0× burn rate against the 99.5% SLO.
+            At this pace, 10% of the monthly error budget will be consumed in 24 hours.
+          runbook: "https://runbooks.example.com/vision-moderation/availability-burn-slow"
+          dashboard: "https://grafana.example.com/d/vision-mod-slo"
+
+      # ──────────────────────────────────────────────────────────────────
+      # 3. P99 Latency High
+      #    Trigger: p99 latency > 1 second sustained for 5 minutes
+      #    Routing: PagerDuty page
+      # ──────────────────────────────────────────────────────────────────
+      - alert: LatencyP99High
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (le) (
+              rate(http_request_duration_seconds_bucket{job="vision-moderation"}[5m])
+            )
+          ) > 1.0
+        for: 5m
+        labels:
+          severity: page
+          team: ml-platform
+          service: vision-moderation
+        annotations:
+          summary: "P99 latency exceeds 1 second SLO threshold"
+          description: >
+            P99 request latency is {{ $value | humanizeDuration }},
+            which breaches the 1 second SLO target.
+            Sustained for 5 minutes.
+          runbook: "https://runbooks.example.com/vision-moderation/latency-p99-high"
+          dashboard: "https://grafana.example.com/d/vision-mod-latency"
+
+      # ──────────────────────────────────────────────────────────────────
+      # 4. Feature Drift Detected
+      #    Trigger: PSI score > 0.2 for any major feature, sustained 1 hour
+      #    Routing: Linear ticket
+      #
+      #    PSI thresholds: < 0.1 no change, 0.1–0.2 slight, > 0.2 significant
+      # ──────────────────────────────────────────────────────────────────
+      - alert: DriftDetected
+        expr: |
+          max by (feature_name) (
+            model_feature_psi_score{job="vision-moderation",feature_tier="major"}
+          ) > 0.2
+        for: 1h
+        labels:
+          severity: ticket
+          team: ml-platform
+          service: vision-moderation
+        annotations:
+          summary: "Input feature drift detected — PSI > 0.2 on {{ $labels.feature_name }}"
+          description: >
+            Feature '{{ $labels.feature_name }}' has a PSI score of {{ $value }},
+            indicating significant distribution shift relative to training data.
+            Sustained for 1 hour. Model performance degradation likely.
+          runbook: "https://runbooks.example.com/vision-moderation/drift-detected"
+          dashboard: "https://grafana.example.com/d/vision-mod-drift"
+
+      # ──────────────────────────────────────────────────────────────────
+      # 5. Model Version Mismatch
+      #    Trigger: Any replica serving a model version that differs from
+      #             the expected version in the model registry, for 5 minutes
+      #    Routing: PagerDuty page
+      # ──────────────────────────────────────────────────────────────────
+      - alert: ModelVersionMismatch
+        expr: |
+          count by (served_version, expected_version) (
+            model_serving_version_info{job="vision-moderation"}
+            unless on (pod)
+            model_serving_version_info{
+              job="vision-moderation",
+              served_version=~".*"
+            }
+            * on (pod) group_left()
+            (
+              model_registry_expected_version{job="vision-moderation"}
+              == on (pod)
+              model_serving_version_info{job="vision-moderation"}
+            )
+          ) > 0
+        for: 5m
+        labels:
+          severity: page
+          team: ml-platform
+          service: vision-moderation
+        annotations:
+          summary: "Model version mismatch — replica serving unexpected version"
+          description: >
+            {{ $value }} replica(s) are serving model version '{{ $labels.served_version }}'
+            but the registry expects '{{ $labels.expected_version }}'.
+            A failed or partial rollout is likely. Investigate immediately.
+          runbook: "https://runbooks.example.com/vision-moderation/model-version-mismatch"
+          dashboard: "https://grafana.example.com/d/vision-mod-versions"
